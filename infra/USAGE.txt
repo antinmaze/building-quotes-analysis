@@ -1,0 +1,47 @@
+This directory contains deployment-ready Bicep for the approved local pilot.
+
+Scope:
+- Existing resource group: rg-devis-mngt
+- Document Intelligence S0 account: di-devis-mngt-dev-ed16
+- Azure OpenAI S0 account: aoai-devis-mngt-dev-ed16
+- Global Standard deployment: devis-extraction, gpt-5-mini, version 2025-08-07, capacity 50
+- Two user-scoped data-plane role assignments for the verified operator object ID
+
+This scaffold does not deploy resources and does not make paid calls.
+
+GitHub Actions (recommended):
+- Offline checks run on pushes and pull requests; no Azure credentials or documents.
+- Deploy Azure AI pilot runs only via workflow_dispatch on main by the repository owner.
+- The azure-pilot environment accepts deployments from main only.
+- Federated identity subject: repo:OWNER/REPO:environment:azure-pilot.
+- Environment secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+  AZURE_OPERATOR_OBJECT_ID. These identifiers are not passwords.
+- Environment variables: AZURE_RESOURCE_GROUP and AZURE_LOCATION.
+- infra/github-oidc.bicep bootstraps the identity once using an authorized Azure operator.
+- GitHub has Cognitive Services Contributor on this resource group, plus conditional
+  RBAC administration limited to two data-plane roles and the specified operator.
+- infra/pilot.bicep deploys at resource-group scope; no subscription-wide grant.
+- Preview is mandatory before deploy. No documents are processed or uploaded by CI.
+- Never publish infra/main.parameters.json, .env, quotes, spreadsheets or OCR caches.
+
+Non-mutating checks:
+  az bicep build --file infra/main.bicep --stdout > /dev/null
+  az deployment sub what-if --subscription "$AZURE_SUBSCRIPTION_ID" --location francecentral --template-file infra/main.bicep --parameters @infra/main.parameters.json
+
+Future deployment, only after explicit approval:
+  az deployment sub create --subscription "$AZURE_SUBSCRIPTION_ID" --location francecentral --template-file infra/main.bicep --parameters @infra/main.parameters.json
+
+The model name and version are infrastructure parameters. A model change is
+not assumed to be plug-compatible: revalidate
+structured-output support, API version, response behavior, and application request
+parameters. The application omits temperature and legacy max_tokens, which are not
+supported by gpt-5-mini, and allows 300 seconds per request. The model revision
+marker invalidates extraction caches without repeating cached OCR.
+Role assignments explicitly depend on account creation. Azure RBAC propagation
+can still take time before the local CLI is allowed to access the services.
+The selected model is gpt-5-mini 2025-08-07. Reasoning tokens are billed as output;
+the previous gpt-4.1-mini pilot estimate is no longer an applicable price estimate.
+
+Global Standard is an explicitly approved residency pilot for 14 PDFs only. Do not
+process the later 3000-document workload without a separate approval. The price
+estimate is provisional usage-based order of magnitude, not a quote or hard cap.

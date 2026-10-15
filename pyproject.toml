@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devis-mngt"
+version = "0.1.0"
+description = "Extraction locale auditée des prix de devis de construction français"
+requires-python = ">=3.11"
+dependencies = [
+  "azure-ai-documentintelligence>=1.0.2,<2",
+  "azure-identity>=1.19,<2",
+  "openai>=1.66,<3",
+  "pydantic>=2.10,<3",
+  "openpyxl>=3.1.5,<4",
+  "pypdf>=5.3,<7",
+]
+
+[project.scripts]
+devis-mngt = "devis_mngt.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
