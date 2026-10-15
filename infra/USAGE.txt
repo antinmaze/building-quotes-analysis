@@ -13,7 +13,11 @@ GitHub Actions (recommended):
 - Offline checks run on pushes and pull requests; no Azure credentials or documents.
 - Deploy Azure AI pilot runs only via workflow_dispatch on main by the repository owner.
 - The azure-pilot environment accepts deployments from main only.
-- Federated identity subject: repo:OWNER/REPO:environment:azure-pilot.
+- Read the exact OIDC sub_claim_prefix using:
+  gh api repos/OWNER/REPO/actions/oidc/customization/sub
+  Recent repositories use repo:OWNER@OWNER_ID/REPO@REPO_ID. Pass that prefix as
+  githubSubjectPrefix to the bootstrap template, not a guessed repository name.
+- Federated identity subject: PREFIX:environment:azure-pilot.
 - Environment secrets: AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
   AZURE_OPERATOR_OBJECT_ID. These identifiers are not passwords.
 - Environment variables: AZURE_RESOURCE_GROUP and AZURE_LOCATION.

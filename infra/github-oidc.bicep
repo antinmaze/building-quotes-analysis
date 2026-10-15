@@ -2,7 +2,8 @@ targetScope = 'resourceGroup'
 
 param location string = resourceGroup().location
 param identityName string = 'id-devis-github'
-param githubRepository string
+@description('Exact repository OIDC prefix from GitHub actions/oidc/customization/sub, including immutable IDs.')
+param githubSubjectPrefix string
 param githubEnvironment string = 'azure-pilot'
 @description('Only this operator can receive the two allowed data-plane roles.')
 param operatorObjectId string
@@ -44,7 +45,7 @@ resource federation 'Microsoft.ManagedIdentity/userAssignedIdentities/federatedI
   name: 'github-azure-pilot'
   properties: {
     issuer: 'https://token.actions.githubusercontent.com'
-    subject: 'repo:${githubRepository}:environment:${githubEnvironment}'
+    subject: '${githubSubjectPrefix}:environment:${githubEnvironment}'
     audiences: [
       'api://AzureADTokenExchange'
     ]
