@@ -55,4 +55,4 @@ resource deployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01
 }
 
 output resourceId string = account.id
-output endpoint string = 'https://${account.name}.cognitiveservices.azure.com/'
+output endpoint string = account.properties.endpoint
