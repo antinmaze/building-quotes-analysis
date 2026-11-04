@@ -1,3 +1,166 @@
+Analyser de nouveaux devis PDF (outil reutilisable)
+=================================================
+
+Le moteur applicatif est dans src/devis_mngt/. Il ne depend ni des devis
+historiques, ni de compet.xlsx, ni des scripts de selection des anciennes vagues.
+Les scripts prepare_wave*, select_wave2 et verify_pilot sont des outils de
+campagne historique, pas des prerequis pour analyser de nouveaux fichiers.
+
+Installation locale (Python >= 3.11) :
+  python3 -m venv .venv
+  . .venv/bin/activate
+  python -m pip install -e .
+
+1. Inventorier un nouveau dossier, sans Azure :
+  devis-mngt inventory --input /chemin/nouveaux-devis
+
+2. Configurer les ressources Azure existantes :
+  # Seulement si .env n'existe pas encore (ne pas ecraser la configuration) :
+  test -e .env || cp .env.sample .env
+  # Renseigner les endpoints et le deploiement dans .env, puis :
+  set -a; . ./.env; set +a
+
+Variables requises : AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT,
+AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT.
+AZURE_TENANT_ID est optionnel pour preciser le tenant de la session az login.
+Les cles optionnelles sont decrites dans .env.sample. L'application ne charge
+pas .env automatiquement et ne cree aucune ressource. run et wave utilisent
+la meme configuration externe : aucun abonnement ou endpoint historique
+n'est impose. Le modele deploye doit etre compatible avec les requetes
+structurees et les parametres du client ; renseigner sa revision dans
+AZURE_OPENAI_MODEL_REVISION pour identifier correctement les caches.
+
+3. Apres accord sur les appels facturables, analyser un PDF ou un dossier :
+  devis-mngt run --input /chemin/nouveaux-devis \
+    --output outputs/nouveaux-devis.xlsx \
+    --cache .devis-cache/nouveaux-devis --log-dir logs/nouveaux-devis \
+    --pdf-only --max-ocr-pages 50 --max-llm-calls 100 --allow-cloud
+
+Les plafonds sont des exemples par execution, pas un budget en euros.
+Sans --allow-cloud, aucun traitement Azure n'est lance. Avec --pdf-only,
+seuls les PDF sont examines ; les sous-dossiers 00_ARCHIVES sont exclus.
+Un chemin de PDF unique est aussi accepte comme --input.
+Le classeur, le cache et les journaux doivent rester hors du dossier source.
+Un nouveau corpus doit utiliser un cache et une sortie dedies : cette commande
+ne fusionne pas automatiquement les nouveaux resultats avec compet.xlsx.
+Pour ajouter des PDF au meme corpus, les placer dans le dossier d'entree
+et relancer la meme commande : les etapes en cache sont reutilisees pour les
+sources et configurations inchangees, et le classeur couvre les fichiers
+actuellement presents dans cette entree. Garder les anciens PDF dans ce dossier
+si leurs lignes doivent rester dans ce classeur. Une limite atteinte arrete
+le run avec erreur et sauvegarde results.partial.json ; relancer avec un
+plafond adapte reprend les etapes cachees. Il n'y a pas de contournement
+automatique des limites ni de garantie de zero appel lors d'une reprise.
+
+4. Regenerer l'Excel sans nouvel appel Azure :
+  devis-mngt export --results .devis-cache/nouveaux-devis/results.json \
+    --output outputs/nouveaux-devis.xlsx --log-dir logs/nouveaux-devis
+
+Le classeur contient les sept champs metier demandes, la provenance des lignes,
+les donnees brutes, les documents ignores et les lignes a verifier.
+Le statut extracted signifie qu'une extraction est disponible, pas que toutes
+les lignes sont validees : seules les lignes admises par les controles vont
+dans Base de prix. Les prix differents restent distincts. Aucune valeur
+manquante ou ambigue n'est remplacee silencieusement par une estimation.
+Les erreurs documentaires restent dans l'audit et produisent un code non nul.
+Codes de sortie : 0 = base avec donnees acceptees, 1 = erreur documentaire,
+2 = configuration/usage/limite, 3 = aucune donnee acceptee.
+L'export hors ligne exige results.json d'un run termine ; un fichier partiel
+ne represente pas l'ensemble du corpus. Toujours examiner A verifier et
+Couverture avant d'utiliser la base de prix.
+
+Controle hors ligne du code, sans documents historiques ni Azure :
+  python -m unittest discover -s tests -q
+
+Ne pas publier .env, devis/, outputs/, results/, logs/ ou .devis-cache/.
+Ne pas lancer les scripts historiques pour un nouveau corpus.
+
+Conserver et reprendre le corpus actuel
+======================================
+
+Le code reutilisable et le corpus historique restent dans ce meme projet.
+Aucun deplacement, renommage ou nettoyage des donnees privees n'est necessaire.
+Conserver les chemins existants : les manifestes et caches referencent les
+sources par chemin et SHA256. Un clone Git seul ne restaure pas le travail local.
+
+Elements a sauvegarder ensemble sur un stockage prive :
+- devis/ : PDF originaux, jamais modifies par l'extraction ;
+- outputs/compet.xlsx ET outputs/compet.campaign.json : paire inseparable ;
+- .devis-cache/ : tous les caches et marqueurs de selection des anciennes vagues ;
+- results/ : selections approuvees, corrections et decisions de revue ;
+- logs/ : historique des traitements ;
+- outputs/backup-compet-import-devis-*/ : sauvegardes avant consolidation ;
+- les autres classeurs et registres de outputs/ : campagnes de reprise et rapports.
+Garder .env separement dans une sauvegarde protegee s'il contient des cles.
+La sauvegarde doit se faire hors traitement, pour obtenir des fichiers coherents.
+Les sauvegardes presentes dans outputs/ sont locales : elles ne protegent pas
+contre une perte du disque. Aucun de ces fichiers prives ne doit etre force-ajoute
+a Git. Conserver aussi PLAN-TRAITEMENT.md comme historique prive ; ce n'est pas
+le mode d'emploi generique ni un etat a jour des traitements.
+
+Les commandes run et export refusent de remplacer un classeur accompagne
+d'un registre .campaign.json ou d'un verrou .xlsx.lock, y compris via un lien
+symbolique. La publication transactionnelle de campagne reste autorisee :
+elle reconstruit toutes les vagues, controle le SHA du classeur, puis met a jour
+le classeur et son registre avec un journal de reprise.
+Ne pas supprimer le registre ou le verrou pour contourner cette protection.
+Un verrou peut signaler un traitement actif ou interrompu : verifier avant reprise.
+
+Pour poursuivre les devis actuels :
+1. Partir du rapport prive outputs/pdf-non-traites-final-2026-11-03.xlsx et
+   des corrections consignees dans results/, sans retraiter tous les PDF.
+2. Preserver les exclusions explicites et verifier les motifs techniques :
+   certains anciens libelles "ecarte" correspondent a des PDF bloques.
+3. Preparer une selection ciblee avec les chemins/SHA et pages retenues.
+   Une reprise deja reussie ne doit pas etre relancee automatiquement.
+4. Appliquer les corrections confirmees au seul PDF concerne et conserver
+   sa provenance avant reintegration dans le cumulatif.
+5. Si Azure est requis, reconstruire/configurer les ressources avant lancement.
+   Le registre verifie aussi l'identite de configuration : de nouveaux endpoints
+   ou un nouveau modele peuvent exiger une migration controlee, avec sauvegarde.
+   Ne pas modifier le JSON a la main ni reutiliser un cache sous une fausse identite.
+
+Le precontrole d'une selection deja approuvee est local :
+  devis-mngt wave --manifest results/SELECTION-EXISTANTE.json --input devis
+Remplacer SELECTION-EXISTANTE par le manifeste voulu, jamais par un choix arbitraire.
+Sans --allow-cloud, cette commande ne traite rien et ne change pas le cumulatif.
+Elle verifie la selection, pas la disponibilite Azure ni toute la campagne.
+Ne pas executer run --input devis --output outputs/compet.xlsx :
+run n'est pas une fusion de campagne et cette destination est desormais protegee.
+
+Pour un nouveau corpus, utiliser par exemple /chemin/nouveau-corpus comme entree,
+.devis-cache/nouveau-corpus comme cache, logs/nouveau-corpus comme journaux et
+outputs/nouveau-corpus.xlsx comme sortie. Cela ne touche pas au corpus actuel.
+Ne jamais lancer deux traitements utilisant le meme cache ou la meme campagne.
+
+Perimetre du commit
+===================
+
+Le commit doit contenir le moteur src/, les tests generiques tests/, les outils
+reutilisables scripts/, la configuration et la documentation technique.
+Les scripts specifiques aux anciennes campagnes et leur test d'instantane
+test_wave_preparation.py restent disponibles localement mais sont ignores par
+Git. Ils contiennent des decisions de selection et des references au corpus :
+ne pas les publier, meme si leur extension est .py. Les conserver dans la
+sauvegarde privee, avec PLAN-TRAITEMENT.md et les donnees de campagne.
+scripts/evaluate_local_ocr.py reste un outil generique et fait partie du code.
+
+Avant de preparer l'index, verifier aussi les nouveaux fichiers non ignores :
+  python scripts/check_public_files.py --include-untracked
+  python -m unittest discover -s tests -q
+  git diff --check
+
+Apres une selection explicite des fichiers du commit, verifier l'index :
+  python scripts/check_public_files.py --staged
+Le controle refuse les fichiers historiques connus meme s'ils sont force-ajoutes.
+Il controle les chemins, pas le contenu : relire le diff avant publication.
+Les tests de campagne prives peuvent s'executer localement ; ils ne sont pas
+necessaires aux tests generiques du code publie. Ne pas utiliser git add -f
+pour inclure des documents, caches, rapports, journaux ou scripts historiques.
+
+Infrastructure et historique du pilote
+=====================================
+
 This directory contains deployment-ready Bicep for the approved local pilot.
 
 Scope:
@@ -41,6 +204,354 @@ structured-output support, API version, response behavior, and application reque
 parameters. The application omits temperature and legacy max_tokens, which are not
 supported by gpt-5-mini, and allows 300 seconds per request. The model revision
 marker invalidates extraction caches without repeating cached OCR.
+Extraction uses low reasoning effort. Blocking review reasons are separated from
+informational comments; line-specific ambiguities must not reject unrelated rows.
+Valid French dates with two-digit years can corroborate the extracted year.
+Simple French decimal quantities (e.g. 1,00) are normalized to 1.00 without
+calculating missing values; ambiguous separators remain validation errors.
+The local pilot workbook is written to results/prix-samples.xlsx; results/ is private.
+Each CLI run/export appends a private JSONL journal in logs/ (override: --log-dir):
+logs/prix-samples.events.jsonl. Follow it with:
+  tail -f logs/prix-samples.events.jsonl
+Each new event also appends one physical row to logs/prix-samples.events.csv
+(UTF-8, semicolon separator, headers, escaped line breaks), readable in VS Code.
+The JSONL is the canonical journal; CSV contains the same new events, with
+spreadsheet formula prefixes escaped. CSV does not backfill older JSONL events.
+Events include UTC timestamp, run ID, sequence, source filename/SHA256, OCR and
+extraction start/end/cache hits/durations, failures, per-line review reasons with
+source pages/excerpts, extracted metadata and final export counts.
+Line indexes refer to extraction order within a source document, not sorted Excel rows.
+Accepted line counts precede exact deduplication; accepted_rows is the final base size.
+Offline exports reconstruct document/line findings with retrospective=true and do not
+invent historical OCR/inference times. The event timestamp is the observation time.
+Journal errors are surfaced; raw SDK error payloads and credentials are not logged.
+Journals contain private quote data, are owner-readable/writable, and stay local.
+
+Quality routing (rules-3):
+Scores are deterministic quality indicators, NOT calibrated AI probabilities.
+Base de prix accepts only lines without blockers and with score >= 0.90.
+Fully corroborated rows score 1.00; interpreted units cap quality at 0.85,
+unless corroborated by a single explicit PU row, matching quantity x price/total,
+and a narrow work rule: explicit forfait, explicit "Le Ml", or countable equipment
+with an integer quantity. Those units score 0.95 and retain interpretation warnings
+and the exact rule in the audit. Surface units without adequate proof remain 0.85.
+Other blocking issues cap quality at 0.60. A price/evidence/HT/arithmetic
+problem caps both price and overall scores at 0.05, regardless of other fields.
+All rejected occurrences go exclusively to A verifier, not to the base.
+Tracabilite remains the full audit (both destinations) with score and destination.
+The seven template columns remain first; numeric quality/price/threshold columns
+are appended to the base, audit and review sheets. The workbook opens on the base.
+Filename project names override a billing name only if the project name is supported
+by the actual document text or by the existing cross-document beneficiary evidence.
+A filename/content client mismatch otherwise blocks the affected source explicitly.
+For multi-block PDFs, the user-confirmed identity rules keep the normalized company
+and project client from the first processed block (pages 1-2 when it has lines).
+Later company and client names do not reject the merge and remain in line audit
+warnings. A missing first company or client stays missing. Other quality checks,
+including raw reading conflicts and filename corroboration, remain unchanged.
+The merge policies invalidate aggregate normalization caches
+without discarding cached OCR or individual block responses.
+
+PO-confirmed surface rule (surface-quantity-1):
+An explicit "Surface X m2" in the source with billed quantity 1 is a Forfait
+for X m2, not a per-m2 price; append "pour X m²" to label and signature.
+A billed quantity equal to that surface stays per m2. No division, multiplication
+or replacement of the source PU is performed. Contradictory explicit units,
+multiple distinct surfaces and ambiguous quantities are not resolved by this rule.
+Surface 1 m2 with quantity 1 is treated per m2, not guessed as a forfait.
+The interpreted unit may score 0.95 only with the usual explicit PU table anchor
+and corroborating quantity x PU / total; other blockers still apply.
+
+Label rules (labels-1), independent of the expected workbook:
+Prefer complete short source descriptions (up to 160 characters), remove known
+room-heading contamination and model-added unit/supply boilerplate absent from
+the source. Preserve source supply/installation scope, dimensions and technical
+features. Long descriptions keep their synthesized technical label, not a cut-off
+first line copied from the reference. Surface forfaits retain "pour X m²".
+The pre-rule label is retained in the audit; prices, signatures and attribution
+are not changed by label cleanup. Options are not appended twice when already
+present in the label. Expected labels are used for comparison only.
+
+Labour labels are qualified from their numbered parent section in OCR tables,
+or the following local subtotal before the next section/table boundary. The
+section and exact OCR row evidence are exported in the audit. Generic labour
+with an anchored but unresolved section is sent for review. Context is also a
+deduplication boundary: identical labour names in different sections do not merge.
+No price, quantity or unit is inferred from this description context.
+
+Company display names use the company segment of the structured filename only
+when its tokens are corroborated by both the raw issuer identity and exact OCR
+company evidence. Uncorroborated filename hints are reported, not substituted.
+The original company identity remains in the audit.
+
+User-approved presentation policy: all new run results use Forfait in the seven
+business columns. The price is the source line total HT, or quantity x source PU
+when the total is absent; an already forfait-priced PU is usable without quantity.
+Otherwise the forfait price is left empty and the occurrence requires review.
+Source arithmetic inconsistencies still block acceptance. Designations append
+the billed quantity and source unit (surface/length/etc. when justified), retaining
+known work dimensions without inventing missing ones. The audit retains source
+PU, quantity, total, raw and normalized source units, and conversion policy.
+Each quantity/scope is a deduplication boundary. No section subtotal is substituted
+for a priced line. This supersedes the earlier per-m2 presentation rule, not the
+faithful source reading. Existing legacy batches keep source presentation unless
+their lines explicitly enable export_forfait.
+
+PO feedback supersedes the all-forfait presentation policy: new runs enable
+export_unit_prices and disable export_forfait. Keep source PU and source units;
+convert forfait to per-m2/per-ml only for a single explicitly labelled surface or
+length, positive, with billed quantity exactly 1. Divide source forfait PU by that
+measure. Ambiguous measured forfaits require review. Product dimensions (doors,
+duct lengths without an explicit metric label) are not construction take-offs.
+Do not infer area from width x height. Unmeasured forfaits remain forfaits.
+Business designations use complete raw OCR descriptions plus attested section
+context. The Données brutes sheet preserves every raw designation, unit, PU,
+quantity and line total. Audit states the conversion formula and source PU;
+Excel retains full division precision, displaying currency to two decimals.
+
+User-confirmed exception: "Tri, gestion, évacuation et valorisation ou élimination
+des déchets" is a Forfait. Export its line total HT (or quantity x PU HT when total
+is absent), never the source PU as a per-tonne/per-m2 price. Preserve the complete
+raw label and source figures. This explicit user decision resolves the inferred
+unit doubt only; missing price, arithmetic and other source blockers still apply.
+
+User-approved VMC packaging: Resist'r RE2020 D82 Iso.25 PVC/intissé 10ml,
+D127 6ml and D160 6ml use U = one packaged length. Keep source PU and fractional
+billed quantities unchanged. Display the product length explicitly in the label;
+never interpret the source PU as per-metre. This narrow rule resolves only the
+unit uncertainty for these exact product descriptions; raw OCR remains unchanged.
+
+LOCAL-FIRST / LOCAL OCR (opt-in, no automatic cloud permission)
+Python dependencies: install the project with pip install -e .
+macOS native prerequisites: brew install tesseract tesseract-lang ghostscript
+Tesseract must list fra in tesseract --list-langs. OCRmyPDF is installed by pip.
+
+Offline diagnosis on the pilot (choose a new report path for each run):
+  devis-mngt plan --input devis-sample --output results/diagnostic-ocr-local.json \
+    --cache .devis-cache/local-pilot --local-ocr
+This command never instantiates Azure clients. It does NOT create a validated
+price database. --local-ocr runs OCRmyPDF/Tesseract fra on pages rejected by the
+native reader, using a separate searchable PDF in a private cache. Originals
+remain unchanged. Private logs retain engine errors/warnings. Missing tools or
+failed OCR are explicit failures, not successful text extraction or cloud calls.
+Force rasterization is applied only to rejected pages of the copy at >=300 dpi;
+rotation/deskew are enabled. This may change the appearance of the COPY.
+Text recognition is not equivalent to correct table/price-column reconstruction.
+Only missing/short/garbled native text or a substantial image triggers Tesseract.
+A native table geometry failure alone does NOT trigger rasterization of correct
+digital text. The pilot stress test showed that forcing OCR on digital text can
+change digits; retaining native text is essential.
+
+After separate authorization only, run supports:
+  --local-first --local-ocr --pdf-only --exclude-dir 00_ARCHIVES
+Local table acceptance requires explicit description/quantity/PU HT/total headers,
+numeric rows with quantity x PU within .02 of total, and no decimal price outside
+the accepted grids. Otherwise only the affected original page is sent to Azure.
+Page numbers, table spans and coordinates remain linked to the original.
+No local text/page truncation; no automatic guessing of missing units or columns.
+No automatic final-version selection or non-quote deletion is implied.
+
+Full Azure OCR caches are reused before local OCR. Local searchable PDFs and
+individual Azure page responses are cached separately for restart/reuse.
+Normalization retains full source excerpts and row IDs in its LLM payload.
+The validated normalization cache version is works-2.
+llm_usage journal events include provider usage (input/output/reasoning details
+where supplied). --max-ocr-pages N and --max-llm-calls N stop BEFORE exceeding
+the per-run counters; interrupted results go to results.partial.json in the cache.
+These are not euro limits or cross-run credit accounting. Calls attempted count
+even on failure. LLM SDK auto-retries are disabled when limits are configured.
+Azure DI transport retries can still occur; do not treat counters as billing proof.
+Price selection/final versions and the global compet.xlsx run still need approval.
+
+PRIVATE BATCH PREPARATION AND SUBSCRIPTION COST WATCH
+  devis-mngt prepare-batches --input devis --manifest results/compet-lots.json \
+    --output outputs/compet-lots.xlsx
+Offline only: PDF inventory, recursive 00_ARCHIVES exclusion, exact SHA256
+deduplication with every original client/path retained. Qualification: up to 50
+short PDFs distributed across clients. Subsequent lots: at most 100 PDFs / 500
+pages, keeping client ordering. A PDF >500 pages is isolated, never truncated.
+Final versions, annexes and quote eligibility are NOT guessed from names.
+All batches await selection and explicit Azure authorization; this command does
+not extract works, create compet.xlsx or copy/move/modify source documents.
+Manifest is checksum-protected; never edit it manually. Outputs cannot overwrite
+existing files or be placed inside the source folder.
+
+Offline review dossier for Wave 3, one package at a time:
+  .venv/bin/python scripts/prepare_wave3.py --package 1
+Package 2 or 3 can be selected by changing the package number. This validates the
+physical inventory against the client-indivisible plan, retains globally identified
+duplicates and blocked PDFs, and records native-text page signals. It makes no
+cloud calls, selects no quote pages, does not authorize processing, and never
+modifies source PDFs. The review workbooks are not the cumulative price workbook.
+
+  devis-mngt costs --subscription SUBSCRIPTION_UUID
+Reads MonthToDate ActualCost/PreTaxCost, daily by ServiceName, across the entire
+explicit subscription (not only this project). Uses the current az login without
+changing the selected subscription. Does not send PDFs or call inference.
+Private output outputs/suivi-cout-azure.xlsx; timestamped snapshots and latest/
+last-success JSON in .devis-cache/azure-costs. EUR/USD are never added together.
+A 429, permission failure or empty result is unavailable, NEVER a zero cost.
+Last successful data remains visible with its timestamp if a check fails.
+Cost Management data can lag and later adjust; month totals are not credit
+balances, and differences between checks are not attribution to this workload.
+The user's EUR128.99 credit was a reference, not a verified current balance.
+No budget, alert rule, RBAC grant, hard euro stop or new Azure resource is created.
+Schedule repeated reads externally or through the session automation; running
+the command once alone does not create continuous monitoring.
+
+APPROVED WAVE SELECTION (works-2)
+  devis-mngt wave
+Default is an offline preflight only: verify approval digest, original PDF SHA,
+page counts, source containment and client folder. Never authorizes cloud calls.
+Wave-one approval is the selected 16 PDFs / 55 pages only, not the 12 deferred
+files or the original 50-PDF provisional wave. Those remain listed in the audit.
+
+Only after a separate explicit launch instruction:
+  devis-mngt wave --allow-cloud --max-ocr-pages 55 --max-llm-calls 32
+Uses the verified Visual Studio tenant and fixed existing project endpoints.
+Requires works-2. Creates private temporary PDFs containing ONLY selected pages
+for Document Intelligence upload; never uploads excluded composite pages.
+Restores original page numbers in OCR page texts, raw page objects and table
+regions, retaining original source path/SHA and source document page count.
+Selected-page OCR caches and client-context normalization keys are separate from
+full-document/pilot caches. Originals and the pilot results are not overwritten.
+Default dedicated cache .devis-cache/compet-wave-1 is pinned to the approved
+manifest/configuration; cumulative output outputs/compet.xlsx for ALL waves.
+Each later approved manifest uses its own dedicated cache, but the SAME output.
+The adjacent private compet.campaign.json journal stores every wave's structured
+results and binds the workbook checksum, source root and normalization settings.
+Keep this journal with the workbook: never delete it to force an overwrite.
+An unrelated or manually modified workbook is refused before inference.
+Replaying an unchanged wave skips successful documents; paused/error documents
+can resume through the cache. A different selection under the same wave name or
+a source/selected PDF already belonging to another wave is refused.
+Every publication rebuilds the global grouping and audit from ALL saved waves:
+same-price works may group, different prices and all source occurrences remain.
+Interrupted publication recovers locally from the journal before inference.
+A lock prevents concurrent campaign writers; a stale lock after a process crash
+requires checking that no writer is running before removing that specific lock.
+Client folder is an untrusted hint, never proof: harmonization and cross-document
+links still require source identity/address evidence. Uncorroborated clients stay
+blocked. Ignored/deferred sources are listed with reasons without cloud calls.
+Stops the wave on a document failure or consumption limit, saving accumulated
+results and producing a paused audit workbook. No next wave is started.
+On explicit user instruction, resume with --defer-source "/absolute/failed.pdf"
+to leave an already failed PDF pending without deleting it or changing the
+approved selection. The original error and deferral are persisted in the wave
+cache, campaign journal and workbook audit. Successful documents are not rerun;
+the deferral remains effective on later resumes. New/unfailed sources cannot
+be deferred through this option.
+With explicit user authorization, --continue-on-document-error automatically
+defers existing and new document validation failures and PdfReadError failures,
+then continues the selection. Deferrals remain persistent with their original
+errors and untouched sources. With --continue-on-document-error, every
+per-document error (including service, authentication and network errors) is
+deferred. Explicit run consumption limits still pause.
+Azure OpenAI calls are sequential, with at least 2 seconds between the end of
+one SDK call and the start of the next in the same backend/run (including failures).
+Time spent on OCR or local processing counts toward this pause; cached LLM results
+do not trigger calls or extra waits. Waiting is logged as llm_wait. HTTP 429 alone
+allows up to two retries, honoring retry-after-ms or retry-after (seconds or HTTP
+date), otherwise waiting 30 then 60 seconds. Delays over 300 seconds pause instead
+of retrying early. Each attempt, including rejected requests, consumes the run's
+LLM call allowance. SDK internal retries are disabled. Rate limits and retry
+decisions are logged as llm_rate_limited. With --continue-on-document-error,
+per-document service errors are deferred and processing continues.
+Structured documents longer than two selected pages are read in consecutive
+blocks of at most two source pages. Normalization is also partitioned by these
+blocks. Source page numbers and global OCR table row IDs remain unchanged.
+Each completed chunk is privately cached for resume; OCR is reused. Conflicting
+metadata and table rows crossing block boundaries are flagged for review.
+Chunk-specific cache keys do not invalidate historical small-document results
+or completed campaign documents. Additional calls, including retries, remain
+subject to the authorized run allowance; a limit pauses rather than skipping data.
+55 pages and 32 LLM calls are conservative PER-RUN limits, not EUR limits or
+cumulative budgets across restarts. SDK automatic LLM retries disabled.
+This selected-page path does not use local-first table routing: at most the
+55 selected pages can require Azure OCR, fewer on cache reuse.
+
+Offline evaluation against the existing pilot results and reference comparison:
+  python scripts/evaluate_local_ocr.py \
+    --diagnostic results/diagnostic-ocr-local.json \
+    --results .devis-cache/results.json \
+    --reference-csv results/comparaison-reference.csv \
+    --output outputs/diagnostic-ocr-local.xlsx
+Use a fresh output path. This produces a separate diagnostic workbook, never
+replaces the validated pilot Excel. Presence of a price in a page/document is a
+weak text-recognition check, NOT proof of correct price-to-work association or
+extraction accuracy. The report separates table acceptance from text recognition.
+
+Structured pipeline (default for CLI run):
+1. Full-document OCR, cached independently; table cells retain columns, page regions
+   and source spans. No repeat OCR charge when changing reading/normalization.
+2. Faithful structured reading of every priced source occurrence; no deduplication.
+   Quantity and unit are separate. Missing explicit units remain null in the raw data.
+   Project beneficiary and billing recipient have separate corroborating excerpts.
+3. Separate normalization request: short complete work names, technical signatures,
+   commercial company name and project name, coherent construction lots.
+   Normalization cannot modify prices, quantities or totals or remove source lines.
+4. Deterministic checks: source evidence, metadata aliases, price-column anchors,
+   retained numeric technical characteristics, arithmetic and unit provenance.
+   Interpreted units have explicit warnings. Blocking issues are line-specific.
+5. Exact grouping by lot, signature, technical numeric features, option, unit,
+   exact Decimal price, company, project and year. No price averaging/summing.
+   All grouped occurrences retain their own trace rows and base-row references.
+   Similar-but-not-identical signatures are not automatically merged.
+   Identical verbatim work labels also link groups within those same boundaries,
+   even when the model produced different signatures for the repeated source label.
+Composite quote lots (plaster/insulation, plumbing/sanitary and masonry) stay
+together in the base; the detailed per-line technical trade remains in the audit.
+
+Workbook:
+- Base de prix: seven template columns; validated grouped works.
+- Traçabilité: every extracted occurrence, billing/project/raw identities,
+  unit origin, warnings, cell IDs, technical signature and base-row reference.
+- À vérifier: blocking issues only; warnings alone do not exclude a valid work.
+- Couverture: detected explicit PU table rows not linked to an extracted line.
+  These are possible omissions or OCR/title artifacts, not silently discarded.
+  This check does not prove exhaustive coverage of image text outside detected tables.
+- Documents ignorés: non-quotes, unsupported files and processing failures.
+- Documents: per-file pages, classification, counts, detected priced rows,
+  project/billing identities, warnings and failures.
+Detected missed table rows are recovered only with explicit designation/PU columns
+and valid source spans; ambiguous cells remain in Couverture. Continuation tables
+inherit headers only with matching column count/x positions on consecutive pages.
+Client identities can be linked across quotes only with an identical beneficiary
+address and a corroborating filename; the donor's source, SHA and evidence are
+retained and checked when loading the batch. Shared billing addresses do not suffice.
+
+Pilot and offline comparison:
+  devis-mngt run --input devis-sample --output results/prix-samples.xlsx --template /local/template.xlsx --allow-cloud
+  devis-mngt compare --reference /local/expected.xlsx --output results/comparaison-reference.csv
+Comparison requires the reference Base de prix and its Source-based Traçabilité
+to represent the same rows. It reports candidates within the same document and
+at the same exact price, designation similarity, blockers and produced values.
+It does not use the expected data to generate production rows. Similarity is not
+proof of technical equivalence; missing reference sources and extra actual sources
+are reported separately. The comparison CSV, workbooks and all logs stay private.
+
+Offline regression of the historical approved 14-PDF pilot:
+  python scripts/verify_pilot.py --reference /local/expected.xlsx \
+    --output-dir outputs/verification-temoins-NEW
+Requires the unchanged pilot PDFs, validated outputs/prix-samples.xlsx and the
+historical works-2 reading/normalization caches. Refuses cloud calls even on a
+cache miss; never aliases historical responses to different version cache keys.
+Writes a separate regenerated workbook, reference comparison and control report.
+Compares all worksheet values, source SHA256, coverage and reference candidate
+uniqueness. A successful replay verifies deterministic rules/export only, NOT
+new OCR/LLM inference quality. Reference covers 7 of the 14 pilot PDFs.
+Report retains audit differences and remaining review cases. No reference data
+is used to generate production rows; workbooks under test are never overwritten.
+
+Qualification on 2026-10-16: works-3 NOT approved for production. All 294 raw
+lines/prices preserved, but 8 previously accepted occurrences now need review
+(220 grouped base rows ->213, 58 review occurrences ->66), plus 16 trade changes.
+Reports: outputs/validation-works-3. Historical pilot workbook/results unchanged.
+User-requested rollback: works-2 and its complete source-evidence payload are
+restored as the default. Experimental works-3 caches/reports remain separate
+for audit and are not selected by the restored application. Validated workbook,
+batch preparation, local OCR and cost monitoring are preserved.
+
 Role assignments explicitly depend on account creation. Azure RBAC propagation
 can still take time before the local CLI is allowed to access the services.
 The selected model is gpt-5-mini 2025-08-07. Reasoning tokens are billed as output;

@@ -3,10 +3,13 @@
 .venv/
 __pycache__/
 outputs/
+results/
+logs/
 .devis-cache/
 *.egg-info/
 .test-work/
 devis-sample/
+devis/
 attachments/
 *.pdf
 *.PDF
@@ -21,3 +24,14 @@ attachments/
 *.bmp
 .DS_Store
 infra/main.parameters.json
+
+# Private campaign history and corpus-specific selection decisions.
+/PLAN-TRAITEMENT.md
+/scripts/create_po_questionnaire.py
+/scripts/group_waves_by_client.py
+/scripts/prepare_wave2.py
+/scripts/prepare_wave3.py
+/scripts/report_wave1_selection.py
+/scripts/select_wave2.py
+/scripts/verify_pilot.py
+/tests/test_wave_preparation.py

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import csv
 import io
 import json
+import os
 import shutil
 import unittest
 import uuid
@@ -20,7 +22,8 @@ from pypdf import PdfWriter
 
 from devis_mngt.cli import main
 from devis_mngt.cloud import AzureBackend, Settings
-from devis_mngt.excel import TRACE_HEADERS, export
+from devis_mngt.excel import BASE_HEADERS, TRACE_HEADERS, export
+from devis_mngt.events import EventJournal
 from devis_mngt.models import Batch, Document, Extraction, HEADERS, Line, OCR, reasons, unit
 from devis_mngt.pipeline import process
 from devis_mngt.storage import inventory, load, save
@@ -78,9 +81,23 @@ class LocalFiles(unittest.TestCase):
 class ModelTests(unittest.TestCase):
     def test_supported_units(self):
         for raw, expected in [("m2", "m²"), ("m²", "m²"), ("m3", "m³"),
-                              ("m³", "m³"), ("ml", "ml"), ("u", "U"), ("forfait", "Forfait")]:
+                              ("m³", "m³"), ("ml", "ml"), ("u", "U"), ("forfait", "Forfait"),
+                              ("For", "Forfait")]:
             self.assertEqual(unit(raw), expected)
         self.assertIsNone(unit("inconnu"))
+
+    def test_short_date_corroborates_year_only_for_valid_matching_date(self):
+        for value, accepted in [("14/04/25", True), ("14-04-25", True),
+                                ("14/04/26", False), ("31/02/25", False),
+                                ("devis 25", False), ("125000", False)]:
+            with self.subTest(value=value):
+                doc = sample()
+                metadata = f"=Atelier +Client {value}"
+                doc.extraction.metadata_excerpt = metadata
+                doc.ocr.content = metadata + "\n" + doc.extraction.lines[0].source_excerpt
+                doc.ocr.page_texts = {"1": doc.ocr.content}
+                flags = reasons(doc, doc.extraction.lines[0])
+                self.assertEqual(not any("Année" in flag for flag in flags), accepted)
 
     def test_missing_quantity_does_not_invent_or_reject(self):
         doc = sample()
@@ -132,8 +149,16 @@ class ModelTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             Extraction.model_validate({**sample().extraction.model_dump(), "unexpected": True})
 
+    def test_french_quantity_normalization_preserves_value(self):
+        data = sample().extraction.lines[0].model_dump()
+        self.assertEqual(Line.model_validate({**data, "quantity": "1,00"}).quantity, "1.00")
+        for invalid in ("1,000,00", "1 000,00", "1,2.3"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
+                Line.model_validate({**data, "quantity": invalid})
+
     def test_schema_all_properties_required_closed(self):
-        schema = Extraction.model_json_schema()
+        from openai.lib._pydantic import to_strict_json_schema
+        schema = to_strict_json_schema(Extraction)
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(set(schema["required"]), set(schema["properties"]))
         nested = schema["$defs"]["Line"]
@@ -152,7 +177,7 @@ class ExcelTests(LocalFiles):
         book = load_workbook(file)
         try:
             base, trace = book["Base de prix"], book["Traçabilité"]
-            self.assertEqual([c.value for c in base[1]], HEADERS)
+            self.assertEqual([c.value for c in base[1]], BASE_HEADERS)
             self.assertEqual(base.max_row, 3)
             self.assertEqual(trace.max_row, 4)
             self.assertEqual(base.cell(2, 4).data_type, "n")
@@ -166,7 +191,7 @@ class ExcelTests(LocalFiles):
             self.assertNotEqual(trace.cell(2, base_column).value, trace.cell(4, base_column).value)
             self.assertEqual(trace.cell(2, base_column).data_type, "n")
             self.assertEqual(base.freeze_panes, "A2")
-            self.assertEqual(base.auto_filter.ref, "A1:G3")
+            self.assertEqual(base.auto_filter.ref, "A1:J3")
             self.assertFalse(any(c.data_type == "f" for s in book for row in s for c in row))
         finally:
             book.close()
@@ -312,6 +337,7 @@ class StorageAndPipelineTests(LocalFiles):
         backend = MagicMock()
         backend.ocr.return_value = sample().ocr
         backend.extract.return_value = sample().extraction
+        backend.extract.return_value.lines[0].quantity = "1"
         cache = self.directory / "cache"
         first = process(folder, cache, self.settings, backend=backend)
         second = process(folder, cache, self.settings, backend=backend)
@@ -375,7 +401,221 @@ class StorageAndPipelineTests(LocalFiles):
         self.assertTrue(reasons(document, document.extraction.lines[0]))
 
 
+class EventJournalTests(LocalFiles):
+    def read_events(self, path):
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    def test_append_only_private_and_separate_runs(self):
+        path = self.directory / "events.jsonl"
+        first = EventJournal(path)
+        first.emit("run_started")
+        second = EventJournal(path)
+        second.emit("export_started")
+        rows = self.read_events(path)
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["run_id"], rows[1]["run_id"])
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(all(row["timestamp_utc"].endswith("+00:00") for row in rows))
+
+    def test_csv_has_one_readable_row_per_event_and_formula_safety(self):
+        path = self.directory / "events.jsonl"
+        journal = EventJournal(path)
+        journal.emit("line_review", designation="=formula\nsecond line",
+                     review_reasons=["Prix absent"], source_excerpt="texte\nsource")
+        EventJournal(path).emit("run_completed")
+        content = journal.csv_path.read_text(encoding="utf-8")
+        self.assertEqual(len(content.splitlines()), 3)
+        rows = list(csv.DictReader(io.StringIO(content), delimiter=";"))
+        self.assertEqual(rows[0]["designation"], "'=formula\\nsecond line")
+        self.assertIn("Prix absent", rows[0]["review_reasons"])
+        self.assertEqual(rows[1]["event"], "run_completed")
+        self.assertEqual(journal.csv_path.stat().st_mode & 0o777, 0o600)
+
+    def test_line_issues_keep_evidence_and_source_without_fabricated_timing(self):
+        path = self.directory / "events.jsonl"
+        doc = sample()
+        doc.extraction.lines[0].unit_price_ht = None
+        EventJournal(path).document(doc, retrospective=True)
+        line, result = self.read_events(path)
+        self.assertEqual(line["event"], "line_review")
+        self.assertEqual(line["source"], doc.source)
+        self.assertEqual(line["pages"], [1])
+        self.assertEqual(line["line_index"], 1)
+        self.assertTrue(line["review_reasons"])
+        self.assertTrue(line["retrospective"])
+        self.assertNotIn("duration_seconds", line)
+        self.assertEqual(result["review_lines"], 1)
+
+    def test_live_stages_report_cache_hits_and_durations(self):
+        source = self.pdf()
+        path = self.directory / "events.jsonl"
+        backend = MagicMock()
+        backend.ocr.return_value = sample().ocr
+        backend.extract.return_value = sample().extraction
+        journal = EventJournal(path)
+        cache = self.directory / "cache"
+        for _ in range(2):
+            process(source, cache, StorageAndPipelineTests.settings,
+                    backend=backend, journal=journal)
+        rows = self.read_events(path)
+        stages = [r for r in rows if r["event"] == "stage_completed"]
+        self.assertEqual([r["cached"] for r in stages], [False, False, True, True])
+        self.assertEqual([r["stage"] for r in stages], ["ocr", "extraction"] * 2)
+        self.assertTrue(all(r["duration_seconds"] >= 0 for r in stages))
+        self.assertEqual([r["sequence"] for r in rows], list(range(1, len(rows) + 1)))
+
+    def test_failed_stage_records_type_not_sdk_secrets(self):
+        source = self.pdf()
+        path = self.directory / "events.jsonl"
+        backend = MagicMock()
+        backend.ocr.side_effect = RuntimeError("secret SDK request payload")
+        with contextlib.redirect_stderr(io.StringIO()):
+            process(source, self.directory / "cache", StorageAndPipelineTests.settings,
+                    backend=backend, journal=EventJournal(path))
+        rows = self.read_events(path)
+        failure = next(r for r in rows if r["event"] == "stage_failed")
+        self.assertEqual(failure["stage"], "ocr")
+        self.assertEqual(failure["exception_type"], "RuntimeError")
+        self.assertNotIn("secret SDK", path.read_text())
+
+    def test_export_writes_retrospective_events_without_cloud(self):
+        results = self.directory / "batch.json"
+        save(results, batch(sample()).model_dump())
+        output = self.directory / "prices.xlsx"
+        with patch("devis_mngt.cli.Settings.from_env", side_effect=AssertionError("No cloud")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = main(["export", "--results", str(results), "--output", str(output),
+                         "--log-dir", str(self.directory / "logs")])
+        self.assertEqual(code, 0)
+        rows = self.read_events(self.directory / "logs" / "prices.events.jsonl")
+        self.assertEqual(rows[0]["event"], "export_started")
+        self.assertTrue(next(r for r in rows if r["event"] == "line_accepted")["retrospective"])
+        self.assertEqual(rows[-1]["event"], "run_completed")
+        self.assertEqual(rows[-1]["accepted_rows"], 1)
+
+
 class SDKAndCLITests(LocalFiles):
+    def test_generic_commands_preserve_campaign_before_loading_or_authenticating(self):
+        output = self.directory / "cumulative.xlsx"
+        output.write_bytes(b"existing workbook")
+        registry = output.with_suffix(".campaign.json")
+        registry.write_bytes(b"existing campaign")
+        for command in ("run", "export"):
+            arguments = ["--input", str(self.directory / "input"), "--allow-cloud"] if command == "run" else [
+                "--results", str(self.directory / "missing.json"),
+            ]
+            with self.subTest(command=command), \
+                 patch("devis_mngt.cli.Settings.from_env") as settings, \
+                 patch("devis_mngt.cli.load") as load_results, \
+                 patch("devis_mngt.cli.process") as process_documents, \
+                 contextlib.redirect_stderr(io.StringIO()) as stderr:
+                status = main([command, *arguments, "--output", str(output),
+                               "--log-dir", str(self.directory / "logs")])
+            self.assertEqual(status, 2)
+            self.assertIn("Classeur de campagne protégé", stderr.getvalue())
+            settings.assert_not_called()
+            load_results.assert_not_called()
+            process_documents.assert_not_called()
+        self.assertEqual(output.read_bytes(), b"existing workbook")
+        self.assertEqual(registry.read_bytes(), b"existing campaign")
+        self.assertFalse((self.directory / "logs").exists())
+
+    def test_direct_export_rejects_campaign_and_symlink_without_modifying_them(self):
+        output = self.directory / "cumulative.xlsx"
+        output.write_bytes(b"existing workbook")
+        output.with_suffix(".campaign.json").write_bytes(b"existing campaign")
+        alias = self.directory / "alias.xlsx"
+        alias.symlink_to(output)
+        for target in (output, alias):
+            with self.subTest(target=target), \
+                 self.assertRaisesRegex(ValueError, "Classeur de campagne protégé"):
+                export(batch(sample()), target)
+        self.assertTrue(alias.is_symlink())
+        self.assertEqual(output.read_bytes(), b"existing workbook")
+
+    def test_export_rejects_locked_destination_without_registry(self):
+        output = self.directory / "locked.xlsx"
+        lock = output.with_suffix(".xlsx.lock")
+        lock.write_bytes(b"")
+        with self.assertRaisesRegex(ValueError, "Classeur de campagne protégé"):
+            export(batch(sample()), output)
+        self.assertFalse(output.exists())
+        self.assertTrue(lock.exists())
+
+    def test_new_pdf_corpus_runs_and_resumes_with_external_configuration(self):
+        from test_reading import reading, normalization
+
+        source = self.pdf("nouveau.pdf")
+        original_bytes = source.read_bytes()
+        cache = self.directory / "cache"
+        output = self.directory / "nouveaux.xlsx"
+        environment = {
+            "AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT": "https://new-di.example",
+            "AZURE_OPENAI_ENDPOINT": "https://new-openai.example",
+            "AZURE_OPENAI_DEPLOYMENT": "new-quotes",
+            "AZURE_OPENAI_MODEL_REVISION": "test-revision",
+        }
+        backend = MagicMock()
+        backend.ocr.return_value = sample().ocr
+        backend.read_quote.return_value = reading()
+        backend.normalize_quote.return_value = normalization()
+        arguments = [
+            "run", "--input", str(source), "--output", str(output),
+            "--cache", str(cache), "--log-dir", str(self.directory / "logs"),
+            "--pdf-only", "--max-ocr-pages", "5", "--max-llm-calls", "10",
+            "--allow-cloud",
+        ]
+        with patch.dict(os.environ, environment, clear=True), \
+             patch("devis_mngt.pipeline.AzureBackend", return_value=backend) as factory, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(arguments), 0)
+            settings = factory.call_args.args[0]
+            self.assertEqual(settings.di_endpoint, environment["AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT"])
+            self.assertEqual(settings.openai_endpoint, environment["AZURE_OPENAI_ENDPOINT"])
+            self.assertEqual(settings.deployment, "new-quotes")
+            self.assertEqual(settings.model_revision, "test-revision")
+            self.assertEqual(main(arguments), 0)
+
+        backend.ocr.assert_called_once_with(source)
+        backend.read_quote.assert_called_once()
+        backend.normalize_quote.assert_called_once()
+        saved = load(cache / "results.json")
+        self.assertEqual(len(saved["documents"]), 1)
+        self.assertEqual(saved["documents"][0]["source"], str(source))
+        self.assertEqual(saved["documents"][0]["status"], "extracted")
+        self.assertEqual(source.read_bytes(), original_bytes)
+        book = load_workbook(output, read_only=True, data_only=True)
+        try:
+            row = next(book["Base de prix"].iter_rows(min_row=2, values_only=True))
+            self.assertEqual(row[:7], ("Peinture", "Pose de peinture", "U", 25, "Atelier", "Client", 2025))
+            self.assertEqual(book["Documents"].cell(2, 1).value, str(source))
+            self.assertEqual(book["Documents"].cell(2, 4).value, "extracted")
+        finally:
+            book.close()
+
+    def test_openai_waits_between_calls_including_failed_calls(self):
+        client = MagicMock()
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(refusal=None, parsed=sample().extraction))]
+        )
+        client.beta.chat.completions.parse.side_effect = [
+            RuntimeError("service unavailable"), response, response,
+        ]
+        journal = MagicMock()
+        backend = AzureBackend(StorageAndPipelineTests.settings, openai_client=client, journal=journal)
+        response.usage = None
+        with patch("devis_mngt.cloud.monotonic", side_effect=[100, 101, 150, 190, 200]), \
+             patch("devis_mngt.cloud.sleep") as sleep:
+            with self.assertRaises(RuntimeError):
+                backend.extract(sample().ocr, "")
+            sleep.assert_not_called()
+            backend.extract(sample().ocr, "")
+            sleep.assert_called_once_with(1)
+            backend.extract(sample().ocr, "")
+            sleep.assert_called_once_with(1)
+        journal.emit.assert_any_call("llm_wait", seconds=1)
+        self.assertEqual(client.beta.chat.completions.parse.call_count, 3)
+
     def test_injected_document_intelligence_uses_full_document_interface(self):
         path = self.directory / "input.pdf"
         path.write_bytes(b"mocked input bytes")
@@ -409,13 +649,15 @@ class SDKAndCLITests(LocalFiles):
         self.assertIs(kwargs["response_format"], Extraction)
         self.assertNotIn("temperature", kwargs)
         self.assertNotIn("max_tokens", kwargs)
+        self.assertEqual(kwargs["reasoning_effort"], "low")
         self.assertIn("DONNÉE NON FIABLE", kwargs["messages"][0]["content"])
         self.assertIn("untrusted_document", kwargs["messages"][1]["content"])
 
     def test_gpt5_revision_identifies_extraction_cache(self):
         settings = Settings("https://di.example", "https://aoai.example", "devis-extraction")
         self.assertEqual(settings.model_revision, "gpt-5-mini-2025-08-07")
-        self.assertEqual(settings.extraction_config()["request_adapter"], "2")
+        self.assertEqual(settings.extraction_config()["request_adapter"], "3")
+        self.assertEqual(settings.extraction_config()["reasoning_effort"], "low")
 
     def test_run_requires_explicit_cloud_permission_before_auth(self):
         with patch("devis_mngt.cli.Settings.from_env", side_effect=AssertionError("No auth")), \
@@ -428,14 +670,16 @@ class SDKAndCLITests(LocalFiles):
         save(results, batch(sample()).model_dump())
         with patch("devis_mngt.cli.Settings.from_env", side_effect=AssertionError("No auth")), \
              contextlib.redirect_stdout(io.StringIO()):
-            code = main(["export", "--results", str(results), "--output", str(self.directory / "prix.xlsx")])
+            code = main(["export", "--results", str(results), "--output", str(self.directory / "prix.xlsx"),
+                         "--log-dir", str(self.directory / "logs")])
         self.assertEqual(code, 0)
 
     def test_empty_batch_reports_no_accepted_data(self):
         results = self.directory / "results.json"
         save(results, batch().model_dump())
         with contextlib.redirect_stdout(io.StringIO()) as stdout:
-            code = main(["export", "--results", str(results), "--output", str(self.directory / "prix.xlsx")])
+            code = main(["export", "--results", str(results), "--output", str(self.directory / "prix.xlsx"),
+                         "--log-dir", str(self.directory / "logs")])
         self.assertEqual(code, 3)
         self.assertIn("audit", stdout.getvalue())
 
@@ -445,7 +689,8 @@ class SDKAndCLITests(LocalFiles):
                          error="illisible", ocr=None, extraction=None)
         save(results, batch(sample(), error).model_dump())
         with contextlib.redirect_stdout(io.StringIO()):
-            code = main(["export", "--results", str(results), "--output", str(self.directory / "prix.xlsx")])
+            code = main(["export", "--results", str(results), "--output", str(self.directory / "prix.xlsx"),
+                         "--log-dir", str(self.directory / "logs")])
         self.assertEqual(code, 1)
 
     def test_inventory_does_not_authenticate(self):
