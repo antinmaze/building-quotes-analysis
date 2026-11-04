@@ -1,0 +1,23 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {"value": "devis-local"},
+    "location": {"value": "francecentral"},
+    "resourceGroupName": {"value": "rg-devis-mngt"},
+    "expectedSubscriptionId": {"value": "00000000-0000-0000-0000-000000000000"},
+    "sessionId": {"value": "startup-cli"},
+    "deployedBy": {"value": "local-operator"},
+    "createdAt": {"value": "REPLACE_WITH_UTC_TIMESTAMP"},
+    "deployerObjectId": {"value": "00000000-0000-0000-0000-000000000000"},
+    "documentIntelligenceName": {"value": "di-change-me-unique"},
+    "openAiName": {"value": "aoai-change-me-unique"},
+    "openAiDeploymentName": {"value": "devis-extraction"},
+    "openAiModelName": {"value": "gpt-5-mini"},
+    "openAiModelVersion": {"value": "2025-08-07"},
+    "openAiCapacity": {"value": 50},
+    "openAiDeploymentSku": {"value": "GlobalStandard"},
+    "openAiApiVersion": {"value": "2024-10-21"},
+    "openAiModelRevision": {"value": "gpt-5-mini-2025-08-07"}
+  }
+}

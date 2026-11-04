@@ -12,6 +12,7 @@ class PublicFileTests(unittest.TestCase):
             "src/devis_mngt/waves.py", "tests/test_waves.py",
             "scripts/evaluate_local_ocr.py", ".env.sample", ".gitignore",
             "pyproject.toml", "infra/USAGE.txt", ".github/workflows/checks.yml",
+            "infra/main.parameters.example.json", "README.md",
         ):
             with self.subTest(name=name):
                 self.assertTrue(allowed(name))
@@ -32,6 +33,7 @@ class PublicFileTests(unittest.TestCase):
             "", ".", "../source.py", "/tmp/source.py", ".env",
             "outputs/compet.xlsx", "results/selection.json",
             "logs/events.jsonl", ".devis-cache/results.json", "devis/devis.pdf",
+            "infra/main.parameters.json",
         ):
             with self.subTest(name=name):
                 self.assertFalse(allowed(name))
