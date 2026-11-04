@@ -6,6 +6,13 @@ restent locaux, sauf les pages envoyées explicitement à Azure pour OCR et
 extraction. L'application n'invente pas les prix manquants et conserve la
 provenance des données.
 
+> **Abonnement Azure nécessaire pour l'extraction complète :** l'OCR et
+> l'extraction IA des devis utilisent Azure AI Document Intelligence et Azure
+> OpenAI, qui doivent être configurés dans un abonnement Azure et peuvent
+> entraîner des frais. Sans Azure, l'inventaire local et la consolidation de
+> résultats existants restent disponibles, mais l'étape `integrate` ne fait
+> qu'un précontrôle et n'extrait pas le contenu du PDF.
+
 ## Prérequis
 
 - Python 3.11 ou plus récent.
