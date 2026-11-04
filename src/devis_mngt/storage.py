@@ -41,11 +41,23 @@ def load(path: Path) -> dict:
     return envelope["payload"]
 
 
-def inventory(root: Path, limit: int | None = None) -> list[dict]:
+def inventory(root: Path, limit: int | None = None, *, pdf_only: bool = False,
+              exclude_dirs: tuple[str, ...] = ()) -> list[dict]:
     if not root.exists():
         raise ValueError(f"Entrée introuvable : {root}")
-    paths = sorted(root.rglob("*")) if root.is_dir() else [root]
+    if root.is_dir():
+        paths = []
+        for base, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = sorted(d for d in dirs if not d.startswith(".")
+                             and d.casefold() not in {s.casefold() for s in exclude_dirs}
+                             and not (Path(base) / d).is_symlink())
+            paths.extend(Path(base) / name for name in files if not (Path(base) / name).is_symlink())
+        paths.sort()
+    else:
+        paths = [root]
     paths = [p for p in paths if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root.parent if root.is_file() else root).parts)]
+    if pdf_only:
+        paths = [p for p in paths if p.suffix.lower() == ".pdf"]
     if limit is not None:
         if limit < 1:
             raise ValueError("--limit doit être positif")
