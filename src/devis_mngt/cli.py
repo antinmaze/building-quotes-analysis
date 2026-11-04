@@ -46,6 +46,32 @@ région sont indicatives et ne provisionnent ni ne sélectionnent une ressource.
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     commands = result.add_subparsers(dest="command", required=True)
+    infrastructure = commands.add_parser(
+        "infra", help="Étape 1 : prévisualiser ou déployer l'infrastructure Bicep existante",
+    )
+    infrastructure.add_argument("--parameters", type=Path, required=True,
+                                help="Fichier ARM privé pour infra/main.bicep")
+    infrastructure.add_argument("--template", type=Path, default=Path("infra/main.bicep"),
+                                help="Template fourni par le dépôt (exécuter depuis le checkout)")
+    infrastructure.add_argument("--settings", type=Path, required=True,
+                                help="Nouveau fichier JSON privé pour l'étape 2")
+    infrastructure.add_argument("--apply", action="store_true",
+                                help="Autoriser explicitement le déploiement facturable après what-if")
+    infrastructure.add_argument("--create-resource-group", action="store_true",
+                                help="Autoriser la création du groupe absent, uniquement avec --apply")
+    integrate = commands.add_parser(
+        "integrate", help="Étape 2 : intégrer un PDF dans un espace dédié, sans changer le cumulatif",
+    )
+    integrate.add_argument("--input", type=Path, required=True)
+    integrate.add_argument("--workspace", type=Path, required=True)
+    integrate.add_argument("--settings", type=Path, help="Configuration produite par infra, sinon variables Azure")
+    integrate.add_argument("--allow-cloud", action="store_true")
+    integrate.add_argument("--max-ocr-pages", type=int, default=50)
+    integrate.add_argument("--max-llm-calls", type=int, default=100)
+    consolidation = commands.add_parser(
+        "consolidate", help="Étape 3 : consolider hors ligne et récupérer base de prix et rapport d'erreurs",
+    )
+    consolidation.add_argument("--workspace", type=Path, required=True)
     inv = commands.add_parser("inventory", help="Sans Azure : fichiers, SHA256, pages, erreurs")
     inv.add_argument("--input", type=Path, required=True)
     inv.add_argument("--limit", type=int)
@@ -146,6 +172,31 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     journal = None
     try:
+        if args.command == "infra":
+            from .startup import deploy_infrastructure
+            summary = deploy_infrastructure(
+                args.parameters, args.template, args.settings, apply=args.apply,
+                create_resource_group=args.create_resource_group,
+            )
+            print(json.dumps(summary, ensure_ascii=False))
+            return 0
+        if args.command == "integrate":
+            from .startup import integrate_pdf
+            summary = integrate_pdf(
+                args.input, args.workspace, args.settings, allow_cloud=args.allow_cloud,
+                max_ocr_pages=args.max_ocr_pages, max_llm_calls=args.max_llm_calls,
+            )
+            print(json.dumps(summary, ensure_ascii=False))
+            if summary["status"] == "limit_reached":
+                return 2
+            return 1 if summary["status"] == "document_error" else 0
+        if args.command == "consolidate":
+            from .startup import consolidate
+            summary = consolidate(args.workspace)
+            print(json.dumps(summary, ensure_ascii=False))
+            if summary["errors"]:
+                return 1
+            return 0 if summary["accepted_rows"] else 3
         if args.command == "serve":
             serve(args.host, args.port)
             return 0

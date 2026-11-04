@@ -1,3 +1,107 @@
+Demarrage en trois etapes depuis le checkout
+==========================================
+
+Les trois commandes sont independantes. Aucune etape ne lance la suivante.
+Les etapes 2 et 3 utilisent un espace prive dedie a un corpus, par exemple
+results/nouveau-corpus. Elles ne modifient pas outputs/compet.xlsx ni son registre.
+Installer d'abord le projet (instructions ci-dessous), puis activer .venv.
+La commande infra est un lanceur du Bicep existant, pas une nouvelle topologie.
+Elle requiert Azure CLI avec Bicep, une session az login et les droits de
+deploiement/RBAC pour le groupe cible. Elle n'installe pas ces outils.
+
+Etape 1 - Infrastructure et configuration
+----------------------------------------
+
+Si le fichier prive infra/main.parameters.json existe, le conserver et en
+verifier les valeurs. Sinon copier le modele public :
+  test -e infra/main.parameters.json || \
+    cp infra/main.parameters.example.json infra/main.parameters.json
+
+Renseigner la souscription, l'object ID Entra de l'utilisateur operateur,
+la region, les noms de comptes uniques et l'horodatage UTC. Les UUID nuls
+et REPLACE_WITH_UTC_TIMESTAMP du modele sont des exemples a remplacer.
+Le modele utilise les services et le deploiement Global Standard deja definis
+dans infra/ ; cela peut traiter les donnees hors de la region du compte.
+Verifier la disponibilite du modele, le quota, les couts et les contraintes de
+residence avant d'autoriser le deploiement. L'operateur RBAC est un utilisateur,
+pas un service principal. Ne pas mettre de cles dans le fichier de parametres.
+
+Previsualisation, sans creation de ressources :
+  devis-mngt infra --parameters infra/main.parameters.json \
+    --settings results/azure-settings.json --create-resource-group
+
+Si le groupe existe, le what-if est execute. S'il est absent, la commande
+annonce seulement sa creation necessaire : ce n'est PAS un what-if complet.
+Le groupe n'est pas cree pendant cette previsualisation.
+
+Apres validation des risques/couts, autoriser le deploiement :
+  devis-mngt infra --parameters infra/main.parameters.json \
+    --settings results/azure-settings.json --create-resource-group --apply
+
+Avec --apply, le groupe absent est cree avant le what-if des ressources.
+En cas d'echec ulterieur, ce groupe peut donc rester cree ; aucune suppression
+automatique n'est effectuee. Sans --create-resource-group, un groupe absent
+est refuse. Un groupe existant de region differente est refuse.
+Le what-if est obligatoire avant le deploiement et toute suppression detectee
+le bloque. Aucun deploiement n'est lance sans --apply.
+Apres succes, les endpoints, le tenant, le deploiement et la revision du modele
+sont enregistres dans le fichier --settings (JSON prive avec checksum).
+Un fichier de configuration existant n'est jamais ecrase : utiliser un autre
+chemin pour un nouveau deploiement. La propagation des droits RBAC peut demander
+quelques minutes. Cette etape ne lance aucune analyse de PDF.
+
+Etape 2 - Integration d'un nouveau PDF
+-------------------------------------
+
+Controler localement un PDF, sans Azure ni ecriture dans l'espace de travail :
+  devis-mngt integrate --input /chemin/devis.pdf \
+    --workspace results/nouveau-corpus
+
+Autoriser ensuite son analyse OCR/IA :
+  devis-mngt integrate --input /chemin/devis.pdf \
+    --workspace results/nouveau-corpus --settings results/azure-settings.json \
+    --max-ocr-pages 50 --max-llm-calls 100 --allow-cloud
+
+--settings peut etre omis si les variables Azure sont deja chargees.
+Repeter cette commande pour chaque PDF a ajouter au meme corpus.
+Chaque fichier a son cache et son resultat ; les autres fichiers integres
+ne sont pas remplaces. Reintegrer le meme chemin actualise son resultat
+(y compris un echec), sans ajouter un doublon de source. Les etapes de cache
+compatibles sont reutilisees. Les limites s'appliquent a chaque execution,
+pas a un budget cumule. Le PDF source doit rester hors du workspace.
+Les erreurs documentaires, y compris les PDF illisibles, sont enregistrees
+pour l'etape 3. Une limite atteinte est aussi enregistree et retourne le code 2 ;
+une reprise avec un plafond adapte reutilise les caches disponibles.
+Un chemin inexistant ou un format autre que PDF est refuse sans integration.
+Cette etape ne produit pas encore le classeur consolide.
+
+Etape 3 - Consolidation et recuperation des rapports, sans Azure
+--------------------------------------------------------------
+
+  devis-mngt consolidate --workspace results/nouveau-corpus
+
+La sortie JSON fournit les chemins absolus et les SHA256 des deux classeurs :
+- prices.xlsx : base de prix, donnees brutes, tracabilite, documents et controles ;
+- errors.xlsx : documents en erreur/non-devis/sans lignes, lignes a verifier
+  et ecarts de couverture OCR.
+Un rapport sans anomalie conserve les en-tetes, il n'est pas absent.
+Les lignes non valides restent hors de la base de prix.
+Les exemplaires identiques peuvent etre regroupes en base sans perdre leurs
+occurrences source ; des prix differents ne sont pas fusionnes.
+Chaque consolidation cree une generation sous workspace/reports/ et conserve
+les rapports precedents. workspace/latest-report.json (enveloppe avec checksum)
+reference la derniere paire publiee. Tant que l'etape 3 n'est pas relancee,
+les rapports ne refletent pas les nouvelles integrations.
+Une erreur de generation ne remplace pas le manifeste de la derniere paire
+publiee. La commande ne copie rien vers compet.xlsx et n'a besoin ni de
+configuration Azure ni d'acces reseau. Les erreurs documentaires retournent 1 ;
+une base sans ligne acceptee retourne 3. Examiner aussi les lignes a verifier
+meme lorsque le code de sortie est 0.
+Un verrou operation.lock empeche les operations simultanees dans le workspace.
+En cas d'interruption, verifier qu'aucun traitement ne tourne avant de retirer
+manuellement ce verrou ; ne jamais contourner un verrou actif.
+Sauvegarder le workspace entier pour conserver cache, resultats et rapports.
+
 Analyser de nouveaux devis PDF (outil reutilisable)
 =================================================
 
@@ -24,7 +128,8 @@ Variables requises : AZURE_DOCUMENT_INTELLIGENCE_ENDPOINT,
 AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_DEPLOYMENT.
 AZURE_TENANT_ID est optionnel pour preciser le tenant de la session az login.
 Les cles optionnelles sont decrites dans .env.sample. L'application ne charge
-pas .env automatiquement et ne cree aucune ressource. run et wave utilisent
+pas .env automatiquement. Seule la commande infra --apply cree des ressources ;
+run et wave utilisent
 la meme configuration externe : aucun abonnement ou endpoint historique
 n'est impose. Le modele deploye doit etre compatible avec les requetes
 structurees et les parametres du client ; renseigner sa revision dans

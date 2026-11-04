@@ -28,13 +28,17 @@ def allowed(name: str) -> bool:
         return name in {".gitignore", ".env.sample"}
     if name in {"pyproject.toml", "requirements.lock", "LICENSE"}:
         return True
+    if name == "README.md":
+        return True
     root = path.parts[0]
     if root in {"src", "tests", "scripts"}:
         return path.suffix in {".py", ".sh"}
     if root == ".github":
         return len(path.parts) == 3 and path.parts[1] == "workflows" and path.suffix in {".yml", ".yaml"}
     if root == "infra":
-        return path.suffix == ".bicep" or name in {"infra/bicepconfig.json", "infra/USAGE.txt"}
+        return path.suffix == ".bicep" or name in {
+            "infra/bicepconfig.json", "infra/USAGE.txt", "infra/main.parameters.example.json",
+        }
     return False
 
 
